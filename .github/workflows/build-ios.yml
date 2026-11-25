@@ -33,7 +33,7 @@ jobs:
           xcodebuild -version
           SDK=$(xcrun --sdk iphoneos --show-sdk-version)
           echo "iPhoneOS SDK: $SDK"
-          [[ "$SDK" == 27.* ]] || { echo "::error::Expected iOS 27 SDK"; exit 1; }
+          [[ "$SDK" == 27 || "$SDK" == 27.* ]] || { echo "::error::Expected iOS 27 SDK"; exit 1; }
 
       - name: Accept Xcode license
         run: sudo xcodebuild -license accept || true
@@ -152,6 +152,7 @@ jobs:
             -configuration Release \
             -derivedDataPath "$RUNNER_TEMP/electerm-derived" \
             -sdk iphoneos \
+            ARCHS=arm64 \
             -destination 'generic/platform=iOS' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
