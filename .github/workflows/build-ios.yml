@@ -1,8 +1,8 @@
-name: Build iOS App
+name: Build unsigned iOS 27 IPA
 
 on:
   push:
-    branches: [ dev ]
+    branches: [ main, dev ]
   workflow_dispatch:
 
 # GitHub Actions already skips workflows when the commit message contains
@@ -11,11 +11,11 @@ on:
 jobs:
   build:
     name: Build electerm iOS
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 120
     if: ${{ !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[ci skip]') && !contains(github.event.head_commit.message, '[no ci]') && !contains(github.event.head_commit.message, '[skip actions]') && !contains(github.event.head_commit.message, '[actions skip]') }}
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - name: Checkout
@@ -28,7 +28,12 @@ jobs:
           cache: npm
 
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+        run: |
+          sw_vers
+          xcodebuild -version
+          SDK=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "iPhoneOS SDK: $SDK"
+          [[ "$SDK" == 27.* ]] || { echo "::error::Expected iOS 27 SDK"; exit 1; }
 
       - name: Accept Xcode license
         run: sudo xcodebuild -license accept || true
@@ -67,7 +72,9 @@ jobs:
           "
 
       - name: Add iOS platform (first run only)
-        run: cd build/ios && [ -d ios ] || npx cap add ios
+        run: |
+          cd build/ios
+          if [ ! -d ios ]; then npx cap add ios; fi
 
       - name: Sync Capacitor (copies web assets + native plugins)
         run: cd build/ios && npx cap sync ios
@@ -143,6 +150,7 @@ jobs:
           cd build/ios/ios/App
           xcodebuild -project App.xcodeproj -scheme App \
             -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/electerm-derived" \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             CODE_SIGNING_ALLOWED=NO \
@@ -152,25 +160,29 @@ jobs:
             ENABLE_USER_SCRIPT_SANDBOXING=NO \
             build
 
-      - name: Locate built .app and upload as artifact
-        if: ${{ !cancelled() }}
+      - name: Package and verify unsigned IPA
         run: |
-          APP=$(find ~/Library/Developer/Xcode/DerivedData -name 'App.app' -type d 2>/dev/null | head -1)
-          if [ -n "$APP" ]; then
-            echo "Built app: $APP"
-            du -sh "$APP"
-            mkdir -p /tmp/ios-build
-            cp -R "$APP" /tmp/ios-build/
-            echo "app-path=$APP" >> "$GITHUB_ENV"
-          else
-            echo "No App.app found in DerivedData"
-          fi
+          set -euo pipefail
+          APP="$RUNNER_TEMP/electerm-derived/Build/Products/Release-iphoneos/App.app"
+          test -d "$APP"
+          EXEC=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+          test -f "$APP/$EXEC"
+          lipo -verify_arch arm64 "$APP/$EXEC"
+          xcrun vtool -show-build "$APP/$EXEC"
+          mkdir -p "$RUNNER_TEMP/electerm-package/Payload"
+          ditto "$APP" "$RUNNER_TEMP/electerm-package/Payload/App.app"
+          rm -rf "$RUNNER_TEMP/electerm-package/Payload/App.app/_CodeSignature"
+          rm -f "$RUNNER_TEMP/electerm-package/Payload/App.app/embedded.mobileprovision"
+          mkdir -p "$GITHUB_WORKSPACE/dist-ipa"
+          cd "$RUNNER_TEMP/electerm-package"
+          ditto -c -k --keepParent Payload "$GITHUB_WORKSPACE/dist-ipa/electerm-ios.ipa"
+          unzip -tq "$GITHUB_WORKSPACE/dist-ipa/electerm-ios.ipa"
+          shasum -a 256 "$GITHUB_WORKSPACE/dist-ipa/electerm-ios.ipa"
 
-      - name: Upload built .app (unsigned, proof of build)
-        if: ${{ !cancelled() && env.app-path != '' }}
+      - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: electerm-ios-app-unsigned
-          path: /tmp/ios-build/App.app
-          if-no-files-found: warn
-          retention-days: 7
+          name: electerm-ios-unsigned
+          path: dist-ipa/electerm-ios.ipa
+          if-no-files-found: error
+          retention-days: 30
