@@ -159,6 +159,7 @@ jobs:
           APP="$RUNNER_TEMP/electerm-simulator/Build/Products/Release-iphonesimulator/App.app"
           LOG="$GITHUB_WORKSPACE/simulator-logs"
           BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")
+          /usr/libexec/PlistBuddy -c 'Print :UIApplicationSceneManifest:UISceneConfigurations:UIWindowSceneSessionRoleApplication:0:UISceneDelegateClassName' "$APP/Info.plist" | grep -Fx ElectermSceneDelegate
           xcrun simctl install "$SIM_UDID" "$APP"
           if curl -fsS --max-time 2 http://127.0.0.1:5577/ >/dev/null 2>&1; then
             echo "::error::Backend port already in use before app launch"; exit 1
@@ -181,7 +182,7 @@ jobs:
           kill -0 "$PID"
           curl -fsS --max-time 5 http://127.0.0.1:5577/ -o "$LOG/backend.html"
           grep -qi electerm "$LOG/backend.html"
-          xcrun simctl io "$SIM_UDID" screenshot "$LOG/electerm.png"
+          xcrun simctl io "$SIM_UDID" screenshot --display=internal "$LOG/electerm.png"
           echo "Electerm stayed alive and served its UI from the embedded Node runtime"
 
       - name: Collect simulator diagnostics
@@ -191,7 +192,7 @@ jobs:
           mkdir -p "$LOG"
           if [ -n "${SIM_UDID:-}" ]; then
             xcrun simctl spawn "$SIM_UDID" log show --last 15m --style compact --predicate 'process == "App" OR eventMessage CONTAINS[c] "electerm"' > "$LOG/unified.log" 2>&1 || true
-            xcrun simctl io "$SIM_UDID" screenshot "$LOG/final.png" || true
+            xcrun simctl io "$SIM_UDID" screenshot --display=internal "$LOG/final.png" || true
             find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 2 -type f \( -name 'App*.ips' -o -name 'App*.crash' \) -mmin -30 -exec cp {} "$LOG/" \; 2>/dev/null || true
             xcrun simctl shutdown "$SIM_UDID" || true
           fi
@@ -234,6 +235,7 @@ jobs:
           set -euo pipefail
           APP="$RUNNER_TEMP/electerm-derived/Build/Products/Release-iphoneos/App.app"
           test -d "$APP"
+          /usr/libexec/PlistBuddy -c 'Print :UIApplicationSceneManifest:UISceneConfigurations:UIWindowSceneSessionRoleApplication:0:UISceneDelegateClassName' "$APP/Info.plist" | grep -Fx ElectermSceneDelegate
           EXEC=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
           test -f "$APP/$EXEC"
           lipo -verify_arch arm64 "$APP/$EXEC"
