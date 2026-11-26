@@ -130,6 +130,84 @@ jobs:
           xcodebuild -project App.xcodeproj -resolvePackageDependencies \
             -configuration Release
 
+      - name: Boot iOS 27 iPhone simulator
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/simulator-logs"
+          xcrun simctl list devices available -j > "$RUNNER_TEMP/sim-devices.json"
+          DEVICE=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["devices"]; print(next((x["udid"] for k,v in sorted(d.items(),reverse=True) if "iOS-27" in k for x in v if x.get("isAvailable") and x["name"].startswith("iPhone")), ""))' "$RUNNER_TEMP/sim-devices.json")
+          test -n "$DEVICE" || { cat "$RUNNER_TEMP/sim-devices.json"; echo "::error::No iOS 27 iPhone simulator installed"; exit 1; }
+          echo "SIM_UDID=$DEVICE" >> "$GITHUB_ENV"
+          xcrun simctl boot "$DEVICE" || true
+          xcrun simctl bootstatus "$DEVICE" -b
+
+      - name: Compile simulator app (Release)
+        run: |
+          set -o pipefail
+          cd build/ios/ios/App
+          xcodebuild -project App.xcodeproj -scheme App \
+            -configuration Release -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=$SIM_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/electerm-simulator" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            ENABLE_USER_SCRIPT_SANDBOXING=NO build \
+            2>&1 | tee "$GITHUB_WORKSPACE/simulator-logs/build.log"
+
+      - name: Launch app and verify embedded networking engine
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/electerm-simulator/Build/Products/Release-iphonesimulator/App.app"
+          LOG="$GITHUB_WORKSPACE/simulator-logs"
+          BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")
+          xcrun simctl install "$SIM_UDID" "$APP"
+          if curl -fsS --max-time 2 http://127.0.0.1:5577/ >/dev/null 2>&1; then
+            echo "::error::Backend port already in use before app launch"; exit 1
+          fi
+          xcrun simctl launch --terminate-running-process --stdout="$LOG/app-stdout.log" --stderr="$LOG/app-stderr.log" "$SIM_UDID" "$BID" | tee "$LOG/launch.log"
+          PID=$(awk '/: [0-9]+$/ {print $NF}' "$LOG/launch.log" | tail -1)
+          test -n "$PID"
+          READY=0
+          for attempt in $(seq 1 90); do
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "::error::Electerm exited before its local server became ready"; exit 1
+            fi
+            if curl -fsS --max-time 2 http://127.0.0.1:5577/ -o "$LOG/backend.html" && grep -qi electerm "$LOG/backend.html"; then
+              READY=1; break
+            fi
+            sleep 2
+          done
+          test "$READY" = 1 || { echo "::error::Electerm backend did not become ready"; exit 1; }
+          sleep 15
+          kill -0 "$PID"
+          curl -fsS --max-time 5 http://127.0.0.1:5577/ -o "$LOG/backend.html"
+          grep -qi electerm "$LOG/backend.html"
+          xcrun simctl io "$SIM_UDID" screenshot "$LOG/electerm.png"
+          echo "Electerm stayed alive and served its UI from the embedded Node runtime"
+
+      - name: Collect simulator diagnostics
+        if: always()
+        run: |
+          LOG="$GITHUB_WORKSPACE/simulator-logs"
+          mkdir -p "$LOG"
+          if [ -n "${SIM_UDID:-}" ]; then
+            xcrun simctl spawn "$SIM_UDID" log show --last 15m --style compact --predicate 'process == "App" OR eventMessage CONTAINS[c] "electerm"' > "$LOG/unified.log" 2>&1 || true
+            xcrun simctl io "$SIM_UDID" screenshot "$LOG/final.png" || true
+            find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 2 -type f \( -name 'App*.ips' -o -name 'App*.crash' \) -mmin -30 -exec cp {} "$LOG/" \; 2>/dev/null || true
+            xcrun simctl shutdown "$SIM_UDID" || true
+          fi
+          for file in "$LOG/app-stdout.log" "$LOG/app-stderr.log"; do
+            if [ -f "$file" ]; then tail -100 "$file"; fi
+          done
+
+      - name: Upload simulator diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: electerm-simulator-diagnostics
+          path: simulator-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Build iOS app (unsigned, device SDK)
         run: |
           # Capacitor scaffolds the native project at build/ios/ios/App/
