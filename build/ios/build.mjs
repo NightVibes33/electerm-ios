@@ -562,6 +562,50 @@ const safeAreaContainerSwift = `import UIKit
 import Capacitor
 import WebKit
 
+@objc(ElectermSceneDelegate)
+final class ElectermSceneDelegate: UIResponder, UIWindowSceneDelegate {
+  var window: UIWindow?
+
+  func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
+             options connectionOptions: UIScene.ConnectionOptions) {
+    guard let windowScene = scene as? UIWindowScene else { return }
+    let appWindow = UIWindow(windowScene: windowScene)
+    let storyboard = UIStoryboard(name: "Main", bundle: nil)
+    appWindow.rootViewController = storyboard.instantiateInitialViewController()
+      ?? SafeAreaContainerViewController()
+    self.window = appWindow
+    appWindow.makeKeyAndVisible()
+    if let activity = connectionOptions.userActivities.first {
+      self.scene(scene, continue: activity)
+    }
+    if !connectionOptions.urlContexts.isEmpty {
+      self.scene(scene, openURLContexts: connectionOptions.urlContexts)
+    }
+  }
+
+  func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+    for context in URLContexts {
+      var options: [UIApplication.OpenURLOptionsKey: Any] = [
+        .openInPlace: context.options.openInPlace
+      ]
+      if let source = context.options.sourceApplication {
+        options[.sourceApplication] = source
+      }
+      if let annotation = context.options.annotation {
+        options[.annotation] = annotation
+      }
+      _ = ApplicationDelegateProxy.shared.application(
+        UIApplication.shared, open: context.url, options: options)
+    }
+  }
+
+  func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+    _ = ApplicationDelegateProxy.shared.application(
+      UIApplication.shared, continue: userActivity, restorationHandler: { _ in })
+  }
+}
+
+
 /// Container that keeps the Capacitor web view below the status bar /
 /// Dynamic Island and above the home indicator, without requiring the
 /// web content itself to be safe-area aware.
@@ -1214,6 +1258,37 @@ function applyResOverlay () {
     console.log('[ios] UIFileSharingEnabled already present, skipping')
   }
 
+
+  // iOS 27 requires a UIScene-based lifecycle. Keep the existing storyboard
+  // and bridge container, but create the window from a UIWindowScene.
+  if (!plist.includes('<key>UIApplicationSceneManifest</key>')) {
+    const sceneXml = `  <key>UIApplicationSceneManifest</key>
+  <dict>
+    <key>UIApplicationSupportsMultipleScenes</key>
+    <false/>
+    <key>UISceneConfigurations</key>
+    <dict>
+      <key>UIWindowSceneSessionRoleApplication</key>
+      <array>
+        <dict>
+          <key>UISceneConfigurationName</key>
+          <string>Default Configuration</string>
+          <key>UISceneClassName</key>
+          <string>UIWindowScene</string>
+          <key>UISceneDelegateClassName</key>
+          <string>ElectermSceneDelegate</string>
+        </dict>
+      </array>
+    </dict>
+  </dict>
+`
+    plist = plist.replace(/<\/dict>\s*<\/plist>\s*$/, sceneXml + '</dict>\n</plist>\n')
+  }
+  // No application-level main storyboard: the scene delegate owns the window.
+  plist = plist.replace(/\s*<key>UIMainStoryboard(?:File|Name)<\/key>\s*<string>[^<]*<\/string>/g, '')
+  if (!plist.includes('<key>UIApplicationSceneManifest</key>')) throw new Error('Scene manifest missing')
+  fs.writeFileSync(plistPath, plist)
+
   // ── Set MARKETING_VERSION from package.json ──────────────────────────
   // The Xcode project's MARKETING_VERSION defaults to 1.0. We overwrite it
   // with the version from package.json so App Store Connect shows the
@@ -1226,6 +1301,9 @@ function applyResOverlay () {
       /MARKETING_VERSION = [^;]*;/g,
       `MARKETING_VERSION = ${VERSION};`
     )
+    pbxproj = pbxproj.replace(/^\s*INFOPLIST_KEY_UIMainStoryboard(?:File|Name) = [^;]*;\s*$/gm, '')
+    pbxproj = pbxproj.replace(/INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;/g,
+      'INFOPLIST_KEY_UIApplicationSceneManifest_Generation = NO;')
     fs.writeFileSync(pbxprojPath, pbxproj)
     console.log('[ios] updated MARKETING_VERSION in', pbxprojPath)
   }
